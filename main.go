@@ -1,11 +1,12 @@
 package main
 
 import (
-	"colStats/csv"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"sync"
 )
 
 func main() {
@@ -22,7 +23,7 @@ func main() {
 }
 
 func run(filenames []string, op string, column int, out io.Writer) error {
-	var opFunc csv.statsFunc
+	var opFunc statsFunc
 
 	if len(filenames) == 0 {
 		return ErrNoFiles
@@ -35,35 +36,82 @@ func run(filenames []string, op string, column int, out io.Writer) error {
 	// Validate the operation and define the opFunc accordingly
 	switch op {
 	case "sum":
-		opFunc = csv.sum
+		opFunc = sum
 	case "avg":
-		opFunc = csv.avg
+		opFunc = avg
+	case "min":
+		opFunc = min
+	case "max":
+		opFunc = max
 	default:
-		return fmt.Errorf("%w: %d", ErrInvalidOperation, op)
+		return fmt.Errorf("%w: %s", ErrInvalidOperation, op)
 	}
 
 	consolidate := make([]float64, 0)
 
-	for _, fname := range filenames {
-		f, err := os.Open(fname)
-		if err != nil {
-			return fmt.Errorf("cannot open file: %w", err)
-		}
+	// Create the channel to recieve results or errors of operations
+	resCh := make(chan []float64)
+	errCh := make(chan error)
+	doneCh := make(chan struct{})
+	filesCh := make(chan string)
 
-		// Parse the CSV into a slice of float64 numbers
-		data, err := csv.csv2float(f, column)
-		if err != nil {
-			return err
-		}
+	wg := sync.WaitGroup{}
 
-		if err := f.Close(); err != nil {
-			return err
+	// Loop through all files sending them through the channel
+	// so each one will be processed when a worker is available
+	go func() {
+		defer close(filesCh)
+		for _, fname := range filenames {
+			filesCh <- fname
 		}
+	}()
 
-		// Append the data to consolidate
-		consolidate = append(consolidate, data...)
+	for i := 0; i < runtime.NumCPU(); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for fname := range filesCh {
+				// Check first if the file exists
+				if _, err := os.Stat(fname); os.IsNotExist(err) {
+					errCh <- ErrNotExist
+					return
+				}
+
+				f, err := os.Open(fname)
+				if err != nil {
+					errCh <- fmt.Errorf("cannot open file: %w", err)
+					return
+				}
+
+				// Parse the CSV into a slice of float64 numbers
+				data, err := csv2float(f, column)
+				if err != nil {
+					errCh <- err
+				}
+
+				if err := f.Close(); err != nil {
+					errCh <- err
+				}
+
+				resCh <- data
+			}
+		}()
 	}
 
-	_, err := fmt.Fprintln(out, opFunc(consolidate))
-	return err
+	go func() {
+		wg.Wait()
+		close(doneCh)
+	}()
+
+	for {
+		select {
+		case err := <-errCh:
+			return err
+		case data := <-resCh:
+			consolidate = append(consolidate, data...)
+		case <-doneCh:
+			_, err := fmt.Fprintln(out, opFunc(consolidate))
+			return err
+		}
+	}
 }

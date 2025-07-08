@@ -7,4 +7,5 @@ var (
 	ErrInvalidColumn    = errors.New("invalid column number")
 	ErrNoFiles          = errors.New("no input files")
 	ErrInvalidOperation = errors.New("invalid operation")
+	ErrNotExist         = errors.New("file does not exist")
 )
